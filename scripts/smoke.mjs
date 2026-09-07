@@ -16,6 +16,7 @@ assert.equal(mod.name, 'web-search-searxng');
 assert.deepEqual(mod.inject, ['tools']);
 assert.equal(mod.SEARXNG_PROVIDER_ID, 'searxng-local');
 assert.equal(mod.SCHOLAR_TOOL_NAME, 'searxng_scholar');
+assert.equal(mod.SEARCH_TOOL_NAME, 'searxng_search');
 assert.equal(typeof mod.apply, 'function');
 
 // --- offline fetch stub; also records every requested URL ---
@@ -38,11 +39,11 @@ globalThis.fetch = async (url) => {
 };
 
 function stubCtx({ withWeb = true } = {}) {
-  const registered = { provider: null, tool: null };
+  const registered = { provider: null, tool: null, searchTool: null };
   const ctx = {
     registered,
     web: withWeb ? { registerSearchProvider: (p) => { registered.provider = p; } } : undefined,
-    tools: { register: (t) => { registered.tool = t; } },
+    tools: { register: (t) => { if (t.name === mod.SEARCH_TOOL_NAME) registered.searchTool = t; else registered.tool = t; } },
     logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
     // mimic cordis: the callback runs once the requested services are available
     inject(deps, callback) {
@@ -59,8 +60,9 @@ assert.throws(() => mod.apply(stubCtx(), { baseURL: 'not a url' }), /not a valid
 assert.throws(() => mod.apply(stubCtx(), { baseURL: 'ftp://example.com' }), /must use http/);
 assert.throws(() => mod.apply(stubCtx(), { baseURL: 'http://example.com', timeoutMs: 0 }), /timeoutMs/);
 assert.throws(() => mod.apply(stubCtx(), { baseURL: 'http://example.com', timeoutMs: 'soon' }), /timeoutMs/);
+assert.throws(() => mod.apply(stubCtx(), { baseURL: 'http://example.com', standaloneSearch: 'yes' }), /standaloneSearch/);
 
-// --- happy path: provider + tool registration ---
+// --- happy path: provider + scholar tool registration, general tool off by default ---
 const ctx = stubCtx();
 mod.apply(ctx, { baseURL: 'http://192.168.205.176:8080/' });
 
@@ -71,6 +73,7 @@ assert.equal(typeof provider.search, 'function');
 assert.equal(tool.name, 'searxng_scholar');
 assert.equal(tool.timeoutMs, 30_000);
 assert.equal(typeof tool.execute, 'function');
+assert.equal(ctx.registered.searchTool, null);
 
 // probe went out once, pinned to format=json, trailing slash stripped
 assert.equal(requestedURLs.length, 1);
@@ -110,5 +113,41 @@ const tuiCtx = stubCtx({ withWeb: false });
 mod.apply(tuiCtx, { baseURL: 'http://192.168.205.176:8080' });
 assert.equal(tuiCtx.registered.provider, null);
 assert.equal(tuiCtx.registered.tool.name, 'searxng_scholar');
+assert.equal(tuiCtx.registered.searchTool, null);
+
+// --- standaloneSearch: true registers searxng_search beside searxng_scholar ---
+const flagCtx = stubCtx();
+mod.apply(flagCtx, { baseURL: 'http://192.168.205.176:8080', engines: 'bing,duckduckgo', standaloneSearch: true });
+const { searchTool } = flagCtx.registered;
+assert.equal(searchTool.name, 'searxng_search');
+assert.equal(flagCtx.registered.tool.name, 'searxng_scholar');
+assert.equal(searchTool.timeoutMs, 30_000);
+
+// general tool: engines whitelist from config flows into the query
+const general = await searchTool.execute({ query: 'searxng json api' }, { signal: new AbortController().signal });
+assert.equal(general.query, 'searxng json api');
+assert.equal(general.engines, 'bing,duckduckgo');
+assert.equal(general.total, 2);
+assert.ok(requestedURLs.at(-1).includes('engines=bing%2Cduckduckgo'));
+assert.ok(requestedURLs.at(-1).includes('format=json'));
+
+// scholar tool under the same config stays pinned to google scholar
+const scholarAgain = await flagCtx.registered.tool.execute({ query: 'attention' }, { signal: new AbortController().signal });
+assert.equal(scholarAgain.engines, 'google scholar');
+assert.ok(requestedURLs.at(-1).includes('engines=google+scholar'));
+
+// general tool without a whitelist reports instance defaults
+const bareCtx = stubCtx();
+mod.apply(bareCtx, { baseURL: 'http://192.168.205.176:8080', standaloneSearch: true });
+const bare = await bareCtx.registered.searchTool.execute({ query: 'q' }, { signal: new AbortController().signal });
+assert.equal(bare.engines, 'instance defaults');
+assert.ok(!requestedURLs.at(-1).includes('engines='));
+
+// --- web-less + standaloneSearch: both tools live, provider still absent ---
+const tuiFlagCtx = stubCtx({ withWeb: false });
+mod.apply(tuiFlagCtx, { baseURL: 'http://192.168.205.176:8080', standaloneSearch: true });
+assert.equal(tuiFlagCtx.registered.provider, null);
+assert.equal(tuiFlagCtx.registered.tool.name, 'searxng_scholar');
+assert.equal(tuiFlagCtx.registered.searchTool.name, 'searxng_search');
 
 console.log('smoke ok: exports, config validation, registration, URL building, and normalization verified');

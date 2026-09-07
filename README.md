@@ -4,6 +4,7 @@
 
 1. **搜索提供方**：在 `ctx.web` seam 注册 `WebSearchProvider`，把 `web_search` 工具路由到实例（patch 把 `web.searchProvider` 钉到它）；经 `ctx.inject(['web'], …)` 挂载，仅当所在 profile 提供 `web` 服务时生效；
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，经实例的 `google scholar` 引擎聚合检索 Google Scholar——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
+3. **`searxng_search` 工具（可选）**：`standaloneSearch: true` 时注册通用搜索工具，与 `searxng_scholar` 共享同一执行核心，仅引擎来源不同（配置的 `engines` 白名单）；供没有 `web_search` 工具的 profile（如纯 TUI）使用，web profile 默认关闭以免列出两个等价的通用搜索工具。
 
 纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本）。
 
@@ -32,14 +33,15 @@
 | 键 | 必填 | 说明 |
 |---|---|---|
 | `baseURL` | 是 | SearXNG 根地址，如 `http://192.168.205.176:8080`；须为合法的 http(s) URL，末尾斜杠会被剥掉，配置非法在加载期即报错 |
-| `engines` | 否 | 逗号分隔的引擎白名单（透传 SearXNG `engines` 参数），如 `bing,duckduckgo`；仅作用于 web_search 提供方 |
-| `language` | 否 | 结果语言（透传 `language` 参数），如 `zh-CN`；同时作为 `searxng_scholar` 的默认语言 |
+| `engines` | 否 | 逗号分隔的引擎白名单（透传 SearXNG `engines` 参数），如 `bing,duckduckgo`；作用于 web_search 提供方与 `searxng_search` 工具 |
+| `language` | 否 | 结果语言（透传 `language` 参数），如 `zh-CN`；同时作为 `searxng_scholar` / `searxng_search` 的默认语言 |
 | `scholarEngines` | 否 | `searxng_scholar` 钉定的引擎，默认 `google scholar` |
-| `timeoutMs` | 否 | `searxng_scholar` 单次调用预算，默认 `30000` |
+| `timeoutMs` | 否 | 两个工具的单次调用预算，默认 `30000` |
+| `standaloneSearch` | 否 | 是否注册 `searxng_search` 通用搜索工具，默认 `false`；仅供没有 `web_search` 工具的 profile 开启。注意本文件对 link 引用的所有 profile 共享，需按 profile 区分时拷贝包目录分别引用 |
 
-## searxng_scholar 工具
+## SearXNG 工具
 
-参数：
+`searxng_scholar` 与 `searxng_search` 共享同一执行核心，参数完全一致，仅引擎来源与工具描述不同：
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -47,6 +49,14 @@
 | `max_results` | 否 | 返回条数（默认 10，上限 30） |
 | `page` | 否 | 结果页码（透传 SearXNG `pageno`，默认 1） |
 | `language` | 否 | BCP-47 语言过滤，如 `zh-CN`；覆盖配置默认值 |
+
+两个工具的差异：
+
+| | `searxng_scholar` | `searxng_search` |
+|---|---|---|
+| 引擎 | 钉定 `scholarEngines`（默认 `google scholar`） | 配置的 `engines` 白名单；未配置则用实例默认 |
+| 注册条件 | 恒注册 | 仅 `standaloneSearch: true` |
+| 定位 | 学术发现（免 ai4scholar 积分） | 通用搜索（无 `web_search` 的 profile 的补位） |
 
 返回：`{ query, engines, total, results[{title,url,snippet,engines,publishedDate,score}], truncated, suggestions?, unresponsiveEngines? }`。Google Scholar 引擎的 `content` 片段常内嵌期刊/被引信息；实例侧未响应的引擎列在 `unresponsiveEngines`。
 

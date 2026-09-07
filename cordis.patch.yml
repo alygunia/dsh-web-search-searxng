@@ -6,6 +6,11 @@
       name: dsh-web-search-searxng
       config:
         baseURL: http://192.168.205.176:8080
+        # Set true only in profiles without the harness web_search tool (e.g. a
+        # bare TUI profile); on web profiles it would list two equivalent
+        # general-search tools. This file is shared by every profile linking
+        # this package directory — copy the package per profile to diverge.
+        standaloneSearch: false
 - id: web
   config:
     searchProvider: searxng-local

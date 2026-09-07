@@ -1,7 +1,7 @@
 {
   "name": "dsh-web-search-searxng",
   "version": "0.0.2",
-  "description": "SearXNG for DeepSeek Harness: registers a self-hosted SearXNG instance as the web_search provider and exposes a searxng_scholar tool",
+  "description": "SearXNG for DeepSeek Harness: registers a self-hosted SearXNG instance as the web_search provider and exposes searxng_scholar plus an optional standalone searxng_search tool",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
