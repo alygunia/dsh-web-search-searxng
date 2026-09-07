@@ -104,9 +104,26 @@ assert.deepEqual(output.unresponsiveEngines, ['slow engine']);
 assert.ok(requestedURLs[2].includes('pageno=2'));
 assert.ok(requestedURLs[2].includes('language=zh-CN'));
 
-// --- default rendering does not throw ---
+// --- presenters must return card-tagged views (ToolCallView / ToolResultView), not bare strings ---
+const callView = tool.presentCall({ query: 'graph neural networks' });
+assert.equal(callView.card, 'generic');
+assert.equal(typeof callView.title, 'string');
+assert.equal(callView.kind, 'search');
+const resultView = tool.presentResult({ query: 'graph neural networks' }, output);
+assert.equal(resultView.card, 'generic');
+assert.equal(typeof resultView.title, 'string');
+
+// --- model-facing render must be ContentBlock[]: a bare string passes the runtime's
+// lossless-JSON snapshot, lands in the durable tool/result as `content: "<text>"`,
+// crashes the next request build ("content.some is not a function"), and bricks the
+// session log's restore validation. Regression guard for exactly that failure. ---
 const rendered = tool.output.render({ query: 'x' }, output);
-assert.ok(rendered.includes('2 result(s)'));
+assert.ok(Array.isArray(rendered), 'render must return ContentBlock[]');
+for (const block of rendered) {
+  assert.equal(block?.type, 'text');
+  assert.equal(typeof block?.text, 'string');
+}
+assert.ok(rendered[0].text.includes('2 result(s)'));
 
 // --- web-less profile (e.g. bare TUI): tool still registers, provider skips ---
 const tuiCtx = stubCtx({ withWeb: false });

@@ -74,21 +74,37 @@
 
 ## 验证
 
-本包自带离线 smoke test（stub 掉 `fetch`，不需要可达实例）：
+三层测试，按外部依赖从少到多：
+
+| 命令 | 依赖 | 覆盖 |
+|---|---|---|
+| `pnpm test` | 无（stub 掉 `fetch`） | 模块导出、加载期配置校验（`baseURL` 类型/合法性、`timeoutMs`）、provider 与工具的注册形态、请求 URL 构造、结果归一化，以及**输出契约回归断言**（`render` 必须返回 `ContentBlock[]`、presenter 必须返回 card 视图） |
+| `pnpm test:e2e` | 可达的 SearXNG 实例 | 离线全链路：真实 HTTP → `execute` → `render` → 宿主同款 `tool/result` 落库 → `packChunkRuns` + zstd 写盘 → `decodeStorageRecord` + `Session.fromRestore` 恢复闸门 → `deriveMessages` 断言；末尾以旧 bug 形态（字符串 content）重放恢复闸门，验证畸形确实被拒绝（疫苗测试） |
+| `pnpm test:dsh` | 可达实例 + LLM API key（`ZAI_CODING_CN_API_KEY`，终端环境或 `~/.dsh/.env`） | 真实独立 dsh 进程：自动把本包 link 进内置 `headless` 档（幂等），从 scratch 工作区跑一次性 `dsh --profile headless` 任务（无端口，与运行中 GUI 互不影响），再用恢复闸门校验产出的会话日志 |
+
+会话日志校验器可单独使用（支持多帧拼接 zstd 与明文两种物理编码）：
 
 ```sh
-pnpm test
+node scripts/check-session-log.mjs <路径>/session.jsonl.zstd
+# PASS <file>: id=... events=N malformed=0 fromRestore=ok
 ```
 
-覆盖：模块导出、加载期配置校验（`baseURL` 类型/合法性、`timeoutMs`）、provider 与工具的注册形态、请求 URL 构造、结果归一化与渲染。
-
-接入真实实例后的端到端验证：
+`web_search` 提供方的装配验证：
 
 ```sh
 dsh --profile web --dump-config | grep -B1 -A4 searxng
 ```
 
-应看到 `web-search-searxng` 插件行与 `web` 行的 `searchProvider: searxng-local`；随后在会话里让模型 `web_search` 任意查询。
+应看到 `web-search-searxng` 插件行与 `web` 行的 `searchProvider: searxng-local`。
+
+## 开发注意：工具输出契约
+
+`defineTool` 对投影函数的返回形态有硬性契约（dsh-tools `schema.d.ts`），运行时不校验、违反会**静默落库并造成会话级故障**：
+
+- `output.render` 必须返回 `ContentBlock[]`（如 `[{ type: 'text', text: '…' }]`）。返回裸字符串时，畸形结果原样写入持久 `tool/result`（块的 `content` 为字符串），下一步构建模型请求即崩溃（`content.some is not a function`），此后该会话每轮必错；重启后恢复会话时又被 `assertMessageEventShape` 拒绝——整个会话无法再打开。
+- `presentCall` / `presentResult` 必须返回 card 视图对象（如 `{ card: 'generic', title: '…' }`），而非裸字符串。
+
+`pnpm test` 与 `pnpm test:e2e` 对以上两条均有回归断言，改动投影函数后务必跑一遍。
 
 ## 卸载
 
