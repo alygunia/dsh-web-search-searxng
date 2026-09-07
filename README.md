@@ -2,7 +2,7 @@
 
 把自部署的 [SearXNG](https://docs.searxng.org/) 实例接入 DeepSeek Harness，提供两个能力：
 
-1. **搜索提供方**：在 `ctx.web` seam 注册 `WebSearchProvider`，把 `web_search` 工具路由到实例（patch 把 `web.searchProvider` 钉到它）；
+1. **搜索提供方**：在 `ctx.web` seam 注册 `WebSearchProvider`，把 `web_search` 工具路由到实例（patch 把 `web.searchProvider` 钉到它）；经 `ctx.inject(['web'], …)` 挂载，仅当所在 profile 提供 `web` 服务时生效；
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，经实例的 `google scholar` 引擎聚合检索 Google Scholar——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
 
 纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本）。
@@ -56,7 +56,7 @@
 
 ## 工作原理
 
-- 插件在 `ctx.web`（`@deepseek-ai/dsh-web` 的 WebRuntime）上 `registerSearchProvider`，id 固定为 `searxng-local`；注册是 Cordis 效应，拔掉 bundle 即回滚。
+- 插件在 `ctx.web`（`@deepseek-ai/dsh-web` 的 WebRuntime）上 `registerSearchProvider`，id 固定为 `searxng-local`；provider 经 `ctx.inject(['web'], …)` 挂载，只有 `web` 服务可用时才注册，注册是 Cordis 效应，拔掉 bundle 即回滚。没有 `web` seam 的 profile（如纯 TUI）也可安装本包：`searxng_scholar` 工具照常可用，仅搜索提供方缺席。
 - provider 选择规则：显式 `web.searchProvider` 优先（本插件即用此路径）；DeepSeek 官方 provider 仍注册但无 key 不可用，互不影响。
 - 加载时对实例做一次探活（5s 超时的 `GET /search?...&format=json`）：可达记 info，不可达仅记 warning，不阻塞装配；`available()` 恒为 `true`，provider 是否启用由显式 `web.searchProvider` 决定，实例宕机会在每次搜索时自行报错。
 - 请求走 `GET {baseURL}/search?q=…&format=json`，`redirect: 'error'`，结果 `results[].{url,title,content}` 映射为 `{url,title,snippet}`；`maxResults` 截断由 seam 统一执行。

@@ -13,7 +13,7 @@ const mod = await import('../lib/index.js');
 
 // --- module surface ---
 assert.equal(mod.name, 'web-search-searxng');
-assert.deepEqual(mod.inject, ['web', 'tools']);
+assert.deepEqual(mod.inject, ['tools']);
 assert.equal(mod.SEARXNG_PROVIDER_ID, 'searxng-local');
 assert.equal(mod.SCHOLAR_TOOL_NAME, 'searxng_scholar');
 assert.equal(typeof mod.apply, 'function');
@@ -37,14 +37,19 @@ globalThis.fetch = async (url) => {
   };
 };
 
-function stubCtx() {
+function stubCtx({ withWeb = true } = {}) {
   const registered = { provider: null, tool: null };
-  return {
+  const ctx = {
     registered,
-    web: { registerSearchProvider: (p) => { registered.provider = p; } },
+    web: withWeb ? { registerSearchProvider: (p) => { registered.provider = p; } } : undefined,
     tools: { register: (t) => { registered.tool = t; } },
     logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    // mimic cordis: the callback runs once the requested services are available
+    inject(deps, callback) {
+      if (deps.includes('web') && withWeb) callback(ctx);
+    },
   };
+  return ctx;
 }
 
 // --- load-time config validation ---
@@ -99,5 +104,11 @@ assert.ok(requestedURLs[2].includes('language=zh-CN'));
 // --- default rendering does not throw ---
 const rendered = tool.output.render({ query: 'x' }, output);
 assert.ok(rendered.includes('2 result(s)'));
+
+// --- web-less profile (e.g. bare TUI): tool still registers, provider skips ---
+const tuiCtx = stubCtx({ withWeb: false });
+mod.apply(tuiCtx, { baseURL: 'http://192.168.205.176:8080' });
+assert.equal(tuiCtx.registered.provider, null);
+assert.equal(tuiCtx.registered.tool.name, 'searxng_scholar');
 
 console.log('smoke ok: exports, config validation, registration, URL building, and normalization verified');
