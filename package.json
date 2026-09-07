@@ -1,0 +1,18 @@
+{
+  "name": "dsh-web-search-searxng",
+  "version": "0.0.1",
+  "description": "SearXNG search provider for DeepSeek Harness: registers a self-hosted SearXNG instance on the web capability seam",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

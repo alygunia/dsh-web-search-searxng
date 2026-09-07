@@ -1,0 +1,11 @@
+# dsh-web-search-searxng bundle patch: mounts the SearXNG search provider and
+# pins web search to it. Patch entries replace a targeted row's whole config,
+# so the `web` override restates every key it owns.
+- insert:
+    - id: web-search-searxng
+      name: dsh-web-search-searxng
+      config:
+        baseURL: http://192.168.205.176:8080
+- id: web
+  config:
+    searchProvider: searxng-local
