@@ -11,6 +11,7 @@
         # general-search tools. This file is shared by every profile linking
         # this package directory — copy the package per profile to diverge.
         standaloneSearch: false
+        scholarEngines: "pubmed,arxiv,google scholar"
 - id: web
   config:
     searchProvider: searxng-local
