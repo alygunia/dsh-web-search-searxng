@@ -116,4 +116,4 @@ dsh --profile web --dump-config | grep -B1 -A4 searxng
 - web_search 提供方仍只映射 `{url,title,snippet}`；`publishedDate`/`engines` 仅在 `searxng_scholar` 工具中映射（SearXNG 各引擎时间格式不一，聚合场景未做归一）。
 - `searxng_scholar` 不分页抓取：单次请求返回单页，翻页由模型显式传 `page`。
 - 只做搜索；`web_fetch` 不受影响（base 默认禁用 fetch）。
-- 运行时依赖 `@deepseek-ai/dsh-tools@0.1.1-rc.2`（与宿主 bundle 同源版本）；宿主升级后若 schema DSL 变化需同步该依赖版本。
+- 运行时依赖 `@deepseek-ai/dsh-tools@0.1.2-rc.1`（随宿主 0.1.2-rc.1 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。注意 dsh-session 0.1.2 起会话 header 强制 `isSeeded` 布尔字段（后端从存储行的 `seedLength` 合成）。

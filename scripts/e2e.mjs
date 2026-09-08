@@ -18,7 +18,9 @@
  * detects the regression class that made sessions unrestorable.
  *
  * Host packages resolve in order: `DSH_HOST_PKGS` env → the scoop install →
- * the repo's .pnpm store. All copies must be 0.1.1-rc.2 (same as the host).
+ * the repo's .pnpm store. Keep every copy on the same version as the running
+ * host (verified against 0.1.2-rc.1; note dsh-session 0.1.2+ requires an
+ * `isSeeded` boolean on session headers).
  *
  * Run: `pnpm test:e2e` (hits the configured SearXNG instance over the network).
  */
@@ -106,6 +108,7 @@ const session = Session.create(`session-e2e-${Date.now().toString(36)}`, undefin
   id: `session-e2e-${Date.now().toString(36)}`,
   createdAt: now,
   cwd: process.cwd(),
+  isSeeded: false, // required by dsh-session 0.1.2+
 });
 session.append('turn/start', { turn: 1 });
 session.append('step/start', { turn: 1, step: 1 });
@@ -138,8 +141,8 @@ session.append('turn/end', { turn: 1, reason: { kind: 'end' } });
 
 const work = join(tmpdir(), `dsh-searxng-e2e-${Date.now().toString(36)}`);
 mkdirSync(work, { recursive: true });
-const headerLine = { type: 'session', version: 0, id: session.header.id, createdAt: session.header.createdAt, cwd: session.header.cwd, delegationDepth: 0 };
-const records = packChunkRuns([...session.events]);
+const headerLine = { type: 'session', version: 0, id: session.header.id, createdAt: session.header.createdAt, cwd: session.header.cwd, delegationDepth: 0, isSeeded: false };
+const records = packChunkRuns(session.snapshotEvents()); // 0.1.2+: the `events` getter is gone
 const jsonl = [JSON.stringify(headerLine), ...records.map((r) => JSON.stringify(r))].join('\n') + '\n';
 const zstPath = join(work, 'session.jsonl.zstd');
 writeFileSync(zstPath, zstdCompressSync(Buffer.from(jsonl, 'utf8')));
@@ -152,11 +155,12 @@ const roundTrip = zstdDecompressSync(readFileSync(zstPath)).toString('utf8').spl
 const restoredHeaderRaw = JSON.parse(roundTrip[0]);
 const { type: _type, ...restoredHeader } = restoredHeaderRaw;
 const events = roundTrip.slice(1).flatMap((line) => decodeStorageRecord(JSON.parse(line)));
-const restored = Session.fromRestore(restoredHeader.id, events, restoredHeader);
+const restored = Session.fromRestore(restoredHeader.id, events, restoredHeader, restoredHeader.isSeeded ? restoredHeader.seedLength : undefined);
+const restoredEvents = restored.snapshotEvents();
 // fromRestore appends a `session/end-seed` marker after a seed not already ending in one
 assert.ok(
-  restored.events.length === events.length
-  || (restored.events.length === events.length + 1 && restored.events.at(-1).type === 'session/end-seed'),
+  restoredEvents.length === events.length
+  || (restoredEvents.length === events.length + 1 && restoredEvents.at(-1).type === 'session/end-seed'),
   'restore must keep every event (plus at most the end-seed marker)',
 );
 console.log(`fromRestore ok: ${events.length} events accepted by the host restore gate`);
@@ -183,6 +187,7 @@ const poisoned = Session.create(`session-e2e-poison-${Date.now().toString(36)}`,
   id: `session-e2e-poison-${Date.now().toString(36)}`,
   createdAt: now,
   cwd: process.cwd(),
+  isSeeded: false, // required by dsh-session 0.1.2+
 });
 poisoned.append('turn/start', { turn: 1 });
 poisoned.append('step/start', { turn: 1, step: 1 });
@@ -196,7 +201,7 @@ poisoned.append('tool/result', {
     content: [{ type: 'tool-result', toolCallId: callId, content: blocks[0].text, isError: false }], // ← the old bug
   },
 }, { surfaceOp: 'append' });
-const poisonEvents = [...poisoned.events];
+const poisonEvents = poisoned.snapshotEvents();
 assert.throws(
   () => Session.fromRestore(poisoned.header.id, poisonEvents, poisoned.header),
   /tool-result block/,

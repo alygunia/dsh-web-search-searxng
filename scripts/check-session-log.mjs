@@ -9,7 +9,8 @@
  * then run the host `Session.fromRestore` gate. Exit 1 if anything fails.
  *
  * Host codec resolution order: $DSH_HOST_PKGS → the scoop dsh install → this
- * repo's .pnpm store (all must be 0.1.1-rc.2, same as the host).
+ * repo's .pnpm store (keep the resolved dsh-session on the same version as the
+ * running host; verified against 0.1.2-rc.1).
  */
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
@@ -96,6 +97,11 @@ async function checkLog(zstPath) {
   const headerRaw = JSON.parse(lines[0]);
   if (headerRaw.type !== 'session') throw new Error('first line is not the session header');
   const { type: _type, ...header } = headerRaw;
+  // 0.1.2+: isSeeded is mandatory and the backend synthesizes it from seedLength
+  // (fromHeaderLine: `isSeeded: line.seedLength !== void 0`); seeded logs restore
+  // with their fork-inherited prefix length as fromRestore's 4th argument.
+  header.isSeeded ??= header.seedLength !== undefined;
+  const inherited = header.isSeeded ? header.seedLength : undefined;
   const events = lines.slice(1).flatMap((line) => decodeStorageRecord(JSON.parse(line)));
   events.forEach((e, i) => { if (e.seq !== i) throw new Error(`seq gap at index ${i}: seq ${e.seq}`); });
 
@@ -105,7 +111,7 @@ async function checkLog(zstPath) {
     const block = e?.data?.message?.content?.[0];
     if (!Array.isArray(e?.data?.message?.content) || block?.type !== 'tool-result' || !Array.isArray(block?.content)) malformed++;
   }
-  Session.fromRestore(header.id, events, header); // the exact production restore gate
+  Session.fromRestore(header.id, events, header, inherited); // the exact production restore gate
   return { name, id: header.id, events: events.length, malformed };
 }
 
