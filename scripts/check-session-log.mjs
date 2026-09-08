@@ -31,7 +31,7 @@ async function importHostPackage(pkg) {
   return import(pkg);
 }
 
-const { decodeStorageRecord, Session } = await importHostPackage('dsh-session');
+const { decodeSeqRanges, decodeStorageRecord, Session } = await importHostPackage('dsh-session');
 
 // ---------------------------------------------------------------------------
 // The production container is CONCATENATED independently-checksummed zstd
@@ -97,12 +97,19 @@ async function checkLog(zstPath) {
   const headerRaw = JSON.parse(lines[0]);
   if (headerRaw.type !== 'session') throw new Error('first line is not the session header');
   const { type: _type, ...header } = headerRaw;
-  // 0.1.2+: isSeeded is mandatory and the backend synthesizes it from seedLength
-  // (fromHeaderLine: `isSeeded: line.seedLength !== void 0`); seeded logs restore
-  // with their fork-inherited prefix length as fromRestore's 4th argument.
-  header.isSeeded ??= header.seedLength !== undefined;
-  const inherited = header.isSeeded ? header.seedLength : undefined;
+  // 0.1.2 header migration (mirror the backend's fromHeaderLine): seedLength is
+  // folded into isSeeded + inheritedEventCount and the field itself is now
+  // forbidden on the header record.
+  const inherited = header.seedLength ?? 0;
+  header.isSeeded = header.seedLength !== undefined;
+  delete header.seedLength;
   const events = lines.slice(1).flatMap((line) => decodeStorageRecord(JSON.parse(line)));
+  // 0.1.2 storage encoding: dense sourceEventSeqs runs are stored as
+  // [start, end] pairs; the in-memory/validator form is the flat expansion.
+  for (const e of events) {
+    const raw = e?.sourceEventSeqs;
+    if (Array.isArray(raw) && raw.some((entry) => Array.isArray(entry))) e.sourceEventSeqs = decodeSeqRanges(raw);
+  }
   events.forEach((e, i) => { if (e.seq !== i) throw new Error(`seq gap at index ${i}: seq ${e.seq}`); });
 
   let malformed = 0;
@@ -111,7 +118,7 @@ async function checkLog(zstPath) {
     const block = e?.data?.message?.content?.[0];
     if (!Array.isArray(e?.data?.message?.content) || block?.type !== 'tool-result' || !Array.isArray(block?.content)) malformed++;
   }
-  Session.fromRestore(header.id, events, header, inherited); // the exact production restore gate
+  Session.fromRestore(header.id, events, header, header.isSeeded ? inherited : undefined); // the exact production restore gate
   return { name, id: header.id, events: events.length, malformed };
 }
 
