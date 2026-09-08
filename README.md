@@ -1,6 +1,6 @@
 # dsh-web-search-searxng
 
-把自部署的 [SearXNG](https://docs.searxng.org/) 实例接入 DeepSeek Harness，提供两个能力：
+把自部署的 [SearXNG](https://docs.searxng.org/) 实例接入 DeepSeek Harness，提供以下能力：
 
 1. **搜索提供方**：在 `ctx.web` seam 注册 `WebSearchProvider`，把 `web_search` 工具路由到实例（patch 把 `web.searchProvider` 钉到它）；经 `ctx.inject(['web'], …)` 挂载，仅当所在 profile 提供 `web` 服务时生效；
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，钉定 `scholarEngines` 引擎（本部署为 `pubmed,arxiv,google scholar`，默认 `google scholar`）聚合学术检索——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
@@ -8,7 +8,7 @@
 
 纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本）。
 
-本包位于仓库 checkout 内的 `plugins/dsh-web-search-searxng/`，profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
+本包为独立 checkout（本部署位于 `E:\Project\dsh-ext\dsh-web-search-searxng`），profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
 
 ## 前置条件
 
@@ -19,7 +19,7 @@
 ## 安装（以 web profile 为例）
 
 1. 编辑 `~/.dsh/profiles/web/package.json`：
-   - `dependencies` 增加 `"dsh-web-search-searxng": "file:/mnt/md/liz/src/deepseek-harness/plugins/dsh-web-search-searxng"`
+   - `dependencies` 增加 `"dsh-web-search-searxng": "link:e:/Project/dsh-ext/dsh-web-search-searxng/"`（`file:` 路径亦可）
    - `dsh.profile.bundles` 数组末尾追加 `"dsh-web-search-searxng"`
 2. 在 `~/.dsh/profiles/web/` 目录执行 `pnpm install`。
 3. 重启 dsh（profile 组合在启动时装配，不热重载）。
@@ -92,7 +92,7 @@ node scripts/check-session-log.mjs <路径>/session.jsonl.zstd
 `web_search` 提供方的装配验证：
 
 ```sh
-dsh --profile web --dump-config | grep -B1 -A4 searxng
+dsh --profile web --dump-config | Select-String searxng
 ```
 
 应看到 `web-search-searxng` 插件行与 `web` 行的 `searchProvider: searxng-local`。
