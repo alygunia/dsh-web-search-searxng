@@ -1,6 +1,9 @@
 # dsh-web-search-searxng bundle patch: mounts the SearXNG search provider and
 # pins web search to it. Patch entries replace a targeted row's whole config,
-# so the `web` override restates every key it owns.
+# so the `web` override restates every key it owns — including `fetchProvider`,
+# which the base row sets: dropping it leaves fetch selection to auto-pick, and
+# a second registered fetch provider would then fail every web_fetch with
+# WEB_PROVIDER_AMBIGUOUS.
 - insert:
     - id: web-search-searxng
       name: dsh-web-search-searxng
@@ -15,3 +18,4 @@
 - id: web
   config:
     searchProvider: searxng-local
+    fetchProvider: http

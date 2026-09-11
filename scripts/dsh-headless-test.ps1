@@ -62,7 +62,9 @@ Write-Host ""
 Write-Host "==> headless exit code: $runCode"
 
 # --- 4. restore-gate validation of the scratch session log ---------------------
-# Layout: sessions/<workspace-slug>/session-<uuid>/session.jsonl[.zstd]
+# Layout: sessions/<workspace-slug>/session-<uuid>/session.v<N>.jsonl[.zstd]
+# (dsh 0.1.5 writes the version-tagged generation name; version zero keeps the
+# original suffix-only name, so accept both and prefer the newest generation.)
 $bucket = Get-ChildItem (Join-Path $dshHome 'sessions') -Directory |
   Where-Object Name -like '*dsh-scholar-headless-test*' |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -71,10 +73,10 @@ if ($bucket) {
   $sessionDir = Get-ChildItem $bucket.FullName -Directory -Filter 'session-*' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($sessionDir) {
-    $log = @('session.jsonl.zstd', 'session.jsonl') |
-      ForEach-Object { Join-Path $sessionDir.FullName $_ } |
-      Where-Object { Test-Path $_ } |
-      Select-Object -First 1
+    $log = Get-ChildItem $sessionDir.FullName -File |
+      Where-Object { $_.Name -match '^session(\.v([0-9]+))?\.jsonl(\.zstd)?$' } |
+      Sort-Object { if ($_.Name -match '\.v([0-9]+)\.') { [int]$Matches[1] } else { 0 } } -Descending |
+      Select-Object -First 1 -ExpandProperty FullName
   }
 }
 if ($log) {

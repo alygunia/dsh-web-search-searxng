@@ -109,9 +109,22 @@ const callView = tool.presentCall({ query: 'graph neural networks' });
 assert.equal(callView.card, 'generic');
 assert.equal(typeof callView.title, 'string');
 assert.equal(callView.kind, 'search');
-const resultView = tool.presentResult({ query: 'graph neural networks' }, output);
+
+// presentResult receives the HOST's ToolResult ({ content, isError, meta }), never
+// the canonical value — the durable meta is projected by output.presentationMeta.
+// Passing `output` here (the old fixture) silently exercised a shape the registry
+// never sends and let a broken card title ship.
+const callArgs = { query: 'graph neural networks' };
+const meta = tool.output.presentationMeta(callArgs, output);
+assert.deepEqual(meta, { total: 2, engines: 'google scholar' });
+const resultView = tool.presentResult(callArgs, { content: [{ type: 'text', text: 'x' }], isError: false, meta });
 assert.equal(resultView.card, 'generic');
-assert.equal(typeof resultView.title, 'string');
+assert.equal(resultView.title, '2 result(s) for "graph neural networks" via SearXNG (google scholar)');
+assert.ok(!resultView.title.includes('undefined'), 'the completed card must never render undefined fields');
+// a failed call must fall back to the generic card, and opaque/absent meta must not throw
+assert.equal(tool.presentResult(callArgs, { content: [{ type: 'text', text: 'boom' }], isError: true, meta }), undefined);
+assert.equal(tool.presentResult(callArgs, { content: [], isError: false }), undefined);
+assert.equal(tool.presentResult(callArgs, { content: [], isError: false, meta: 'nonsense' }), undefined);
 
 // --- model-facing render must be ContentBlock[]: a bare string passes the runtime's
 // lossless-JSON snapshot, lands in the durable tool/result as `content: "<text>"`,

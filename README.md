@@ -6,9 +6,9 @@
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，钉定 `scholarEngines` 引擎（本部署为 `pubmed,arxiv,google scholar`，默认 `google scholar`）聚合学术检索——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
 3. **`searxng_search` 工具（可选）**：`standaloneSearch: true` 时注册通用搜索工具，与 `searxng_scholar` 共享同一执行核心，仅引擎来源不同（配置的 `engines` 白名单）；供没有 `web_search` 工具的 profile（如纯 TUI）使用，web profile 默认关闭以免列出两个等价的通用搜索工具。
 
-纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本）。
+纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本，当前 `^0.1.5-rc.2`）。
 
-本包为独立 checkout（本部署位于 `E:\Project\dsh-ext\dsh-web-search-searxng`），profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
+本包为独立 checkout（本机位于 `/mnt/md/liz/Project/dsh/dsh-web-search-searxng`），profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
 
 ## 前置条件
 
@@ -19,12 +19,29 @@
 ## 安装（以 web profile 为例）
 
 1. 编辑 `~/.dsh/profiles/web/package.json`：
-   - `dependencies` 增加 `"dsh-web-search-searxng": "link:e:/Project/dsh-ext/dsh-web-search-searxng/"`（`file:` 路径亦可）
+   - `dependencies` 增加 `"dsh-web-search-searxng": "link:/mnt/md/liz/Project/dsh/dsh-web-search-searxng"`（`file:` 路径亦可，见下方差异）
    - `dsh.profile.bundles` 数组末尾追加 `"dsh-web-search-searxng"`
 2. 在 `~/.dsh/profiles/web/` 目录执行 `pnpm install`。
 3. 重启 dsh（profile 组合在启动时装配，不热重载）。
 
 其他 profile（tui / dsh-tui）同理，改对应目录下的 package.json。
+
+### 升级已安装的 profile（本机现状）
+
+本机 `web` 与 `dsh-tui` 两个 profile 的 dependencies 目前指向 **另一份旧副本**
+`/mnt/md/liz/src/deepseek-harness/plugins/dsh-web-search-searxng`（该副本没有 `searxng_scholar` 工具）。要让本仓库这份代码生效：
+
+```sh
+# 1. 改指向（也可手改 package.json）
+cd ~/.dsh/profiles/web
+pnpm remove dsh-web-search-searxng
+pnpm add "link:/mnt/md/liz/Project/dsh/dsh-web-search-searxng"
+# 2. 确认 dsh.profile.bundles 里仍有 "dsh-web-search-searxng"（pnpm add 不会自动加）
+# 3. 重启 dsh（profile 组合只在启动时装配）
+```
+
+注意 `link:` 与 `file:` 的差别：`link:` 在 profile 的 `node_modules` 里建**符号链接**，改源码即生效（仍需重启 dsh 重新装配）；
+`file:` 会在 `pnpm install` 时把目录内容**复制**进 profile，改源码后必须重跑 `pnpm install` 才会同步。
 
 ## 配置
 
@@ -62,7 +79,7 @@
 
 注意：模型工具清单在**会话启动时固定**，安装或修改本工具后需重启 dsh 并开新会话才会出现；`web_search` 提供方切换同样在启动时装配。
 
-同一份 patch 还覆盖了 `web` 行的 `searchProvider: searxng-local`。注意 patch 是整行替换：若上游 base 为 `web` 行新增 key，需要在这里重述。
+同一份 patch 还覆盖了 `web` 行的 `searchProvider: searxng-local` **与** `fetchProvider: http`。注意 patch 是整行替换（loader 逐 key 赋值，不做深合并）：`web` 行原本的每个 key 都必须在这里重述，漏掉 `fetchProvider` 会让 web_fetch 退化为“唯一可用提供方自动选择”，一旦 profile 里再注册第二个 fetch provider 就会以 `WEB_PROVIDER_AMBIGUOUS` 全量失败。上游 base 为 `web` 行新增 key 时同理。
 
 ## 工作原理
 
@@ -74,37 +91,47 @@
 
 ## 验证
 
+先装依赖（本仓库不带 `node_modules`，`pnpm test` 等命令需要它才解析得到 `@deepseek-ai/dsh-tools`）：
+
+```sh
+pnpm install
+```
+
 三层测试，按外部依赖从少到多：
 
 | 命令 | 依赖 | 覆盖 |
 |---|---|---|
-| `pnpm test` | 无（stub 掉 `fetch`） | 模块导出、加载期配置校验（`baseURL` 类型/合法性、`timeoutMs`）、provider 与工具的注册形态、请求 URL 构造、结果归一化，以及**输出契约回归断言**（`render` 必须返回 `ContentBlock[]`、presenter 必须返回 card 视图） |
-| `pnpm test:e2e` | 可达的 SearXNG 实例 | 离线全链路：真实 HTTP → `execute` → `render` → 宿主同款 `tool/result` 落库 → `packChunkRuns` + zstd 写盘 → `decodeStorageRecord` + `Session.fromRestore` 恢复闸门 → `deriveMessages` 断言；末尾以旧 bug 形态（字符串 content）重放恢复闸门，验证畸形确实被拒绝（疫苗测试） |
-| `pnpm test:dsh` | 可达实例 + LLM API key（`ZAI_CODING_CN_API_KEY`，终端环境或 `~/.dsh/.env`） | 真实独立 dsh 进程：自动把本包 link 进内置 `headless` 档（幂等），从 scratch 工作区跑一次性 `dsh --profile headless` 任务（无端口，与运行中 GUI 互不影响），再用恢复闸门校验产出的会话日志 |
+| `pnpm test` | 无（stub 掉 `fetch`） | 模块导出、加载期配置校验（`baseURL` 类型/合法性、`timeoutMs`）、provider 与工具的注册形态、请求 URL 构造、结果归一化，以及**投影契约回归断言**（`render` 必须返回 `ContentBlock[]`；`presentResult` 必须从宿主给的 `ToolResult.meta` 取标题、失败时回退通用卡片） |
+| `pnpm test:e2e` | 可达的 SearXNG 实例（`SEARXNG_BASE_URL` 可覆盖 patch 里的地址） | 离线全链路：真实 HTTP → `execute` → `render` → 宿主同款 `tool/result` → 宿主 format catalog 的 `encodeCurrentHeader`/`encodeCurrentEvent` 编码 v3 行 + zstd 写盘 → catalog `createRestore` + `Session.fromRestore` 恢复闸门 → `deriveMessages` 断言；末尾以旧 bug 形态（字符串 content）重放恢复闸门，验证畸形确实被拒绝（疫苗测试） |
+| `pnpm test:dsh`（Windows PowerShell）<br>`pnpm test:dsh:sh`（POSIX bash） | 可达实例 + LLM API key（`ZAI_CODING_CN_API_KEY`，终端环境或 `~/.dsh/.env`） | 真实独立 dsh 进程：自动把本包 link 进内置 `headless` 档（幂等），从 scratch 工作区跑一次性 `dsh --profile headless` 任务（无端口，与运行中 GUI 互不影响），再用恢复闸门校验产出的会话日志 |
 
-会话日志校验器可单独使用（支持多帧拼接 zstd 与明文两种物理编码）：
+会话日志校验器可单独使用（支持多帧拼接 zstd 与明文两种物理编码；接受 `session.v<N>.jsonl[.zstd]` 与旧的 `session.jsonl[.zstd]`）：
 
 ```sh
-node scripts/check-session-log.mjs <路径>/session.jsonl.zstd
-# PASS <file>: id=... events=N malformed=0 fromRestore=ok
+node scripts/check-session-log.mjs ~/.dsh/sessions/<bucket>/session-*/session.v3.jsonl.zstd
+# PASS  <bucket>/session-xxxx/session.v3.jsonl.zstd: id=... v=3->3 events=N malformed=0 fromRestore=ok messages=M frames=F
 ```
+
+它用**宿主自己的** Session format catalog 解码（`@deepseek-ai/dsh-session-format-catalog`，与 JSONL 持久化后端同一条解码 + 迁移链），所以 v3 直接读、旧版日志按后端同款迁移链升级；末尾未写完的记录与撕裂的 zstd 尾帧会被丢弃并标注 `[tail=…]`（与生产“只恢复已提交前缀”一致），其余任何坏行一律 FAIL。
 
 `web_search` 提供方的装配验证：
 
 ```sh
-dsh --profile web --dump-config | Select-String searxng
+dsh --profile web --dump-config | grep -A3 'id: web$'      # POSIX
+dsh --profile web --dump-config | Select-String searxng     # PowerShell
 ```
 
-应看到 `web-search-searxng` 插件行与 `web` 行的 `searchProvider: searxng-local`。
+应看到 `web-search-searxng` 插件行与 `web` 行的 `searchProvider: searxng-local`（以及 `fetchProvider: http`）。
 
 ## 开发注意：工具输出契约
 
-`defineTool` 对投影函数的返回形态有硬性契约（dsh-tools `schema.d.ts`），运行时不校验、违反会**静默落库并造成会话级故障**：
+`defineTool` 对投影函数的形态有硬性契约（dsh-tools `schema.d.ts`），运行时不校验、违反会**静默落库并造成会话级故障**：
 
 - `output.render` 必须返回 `ContentBlock[]`（如 `[{ type: 'text', text: '…' }]`）。返回裸字符串时，畸形结果原样写入持久 `tool/result`（块的 `content` 为字符串），下一步构建模型请求即崩溃（`content.some is not a function`），此后该会话每轮必错；重启后恢复会话时又被 `assertMessageEventShape` 拒绝——整个会话无法再打开。
 - `presentCall` / `presentResult` 必须返回 card 视图对象（如 `{ card: 'generic', title: '…' }`），而非裸字符串。
+- `presentResult(args, result)` 的第二参是 **`ToolResult`（`{ content, isError, meta }`），不是规范输出值**。卡片要用的字段必须先经 `output.presentationMeta` 投影进 `meta`：直接读 `result.total` 只会渲染出 `undefined result(s) … (undefined)`（且失败调用也会画出一张假卡片）。`presentationMeta` 的返回值会被原样持久化到 `tool/result`，因此它必须是无损 JSON；`result.isError` 时返回 `undefined` 以回退到通用错误卡片。
 
-`pnpm test` 与 `pnpm test:e2e` 对以上两条均有回归断言，改动投影函数后务必跑一遍。
+`pnpm test` 与 `pnpm test:e2e` 对以上三条均有回归断言，改动投影函数后务必跑一遍。
 
 ## 卸载
 
@@ -116,4 +143,5 @@ dsh --profile web --dump-config | Select-String searxng
 - web_search 提供方仍只映射 `{url,title,snippet}`；`publishedDate`/`engines` 仅在 `searxng_scholar` 工具中映射（SearXNG 各引擎时间格式不一，聚合场景未做归一）。
 - `searxng_scholar` 不分页抓取：单次请求返回单页，翻页由模型显式传 `page`。
 - 只做搜索；`web_fetch` 不受影响（base 默认禁用 fetch）。
-- 运行时依赖 `@deepseek-ai/dsh-tools@0.1.2-rc.1`（随宿主 0.1.2-rc.1 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。注意 dsh-session 0.1.2 起会话 header 强制 `isSeeded` 布尔字段（后端从存储行的 `seedLength` 合成）。
+- 运行时依赖 `@deepseek-ai/dsh-tools@^0.1.5-rc.2`（与宿主 0.1.5-rc.x 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。
+- 会话侧基线是 dsh-session 0.1.5：会话 header 必须 `version: 3`（`SESSION_FORMAT_VERSION`）、带 `isSeeded` 布尔与 `delegationDepth`，锁文件名为 `session.v3.jsonl.zstd`，事件行由宿主 format catalog 编解码（0.1.2 时代的 `packChunkRuns`/`decodeStorageRecord` 已从 dsh-session 移除）。`assistant/message` 事件还必须携带结算字段 `stream: []`。
