@@ -1,33 +1,42 @@
 /**
  * Validate a DSH session log the way production restore does — out-of-process.
  *
- * Usage: node scripts/check-session-log.mjs <path/to/session.jsonl.zstd> [...more]
+ * Usage: node scripts/check-session-log.mjs <session dir | log file> [...more]
  *
- * Per log: decompress (concatenated zstd frames, node:zlib zstd), parse the
- * header line, decode every event row through the HOST's own Session format
- * catalog (`@deepseek-ai/dsh-session-format-catalog` — the same codec plus
- * adjacent migration chain the JSONL persistence backend runs), count
- * malformed tool/result blocks (string content = the bricked-session shape),
- * then gate the artifact through `Session.fromRestore` and `deriveMessages`.
+ * Per log: resolve the newest storage generation, decompress (concatenated zstd
+ * frames, node:zlib zstd), decode every row through the HOST's own Session
+ * format catalog (`@deepseek-ai/dsh-session-format-catalog` — the same codec and
+ * migration chain the JSONL persistence backend runs), count malformed
+ * tool/result messages (non-array content = the bricked-session shape), then
+ * gate the artifact through `Session.fromRestore` and `deriveMessages`.
  * Exit 1 if anything fails.
  *
  * Reading the host's catalog instead of hand-decoding rows is deliberate: the
- * storage row encoding is provider-owned and has already changed once
- * (`packChunkRuns`/`decodeStorageRecord` were removed from dsh-session in the
- * 0.1.5 line, and every event now occupies one row). Mirroring the backend's
- * own decoder keeps this checker honest across format generations: current v3
- * logs are validated as-is and older generations go through the same
- * migrations the harness would run.
+ * storage encoding is provider-owned and has changed repeatedly (`packChunkRuns`
+ * / `decodeStorageRecord` were removed in the 0.1.5 line; format v4 moved
+ * tool results to first-class `role: "tool"` messages whose `content` IS the
+ * block array, with no `{type: "tool-result"}` wrapper). Mirroring the backend's
+ * own decoder keeps this checker honest across format generations.
+ *
+ * Storage layout (0.1.5+): sessions/<slug>/<session-id>/session[.v<N>].jsonl[.zstd]
+ * — every version carries its own immutable generation file, so a session that
+ * survived upgrades accumulates them and the newest one is the current log.
+ *
+ * Pre-v4 logs additionally need the parent's historical children for the
+ * V3→V4 migration (`createSessionFormatCatalogWithChildren`; an empty array
+ * declares no children). This checker detects children from the sibling session
+ * directories and passes `[]` only when there genuinely are none; a legacy log
+ * WITH children is reported rather than migrated with a wrong fact set.
  *
  * Host codec resolution order: $DSH_HOST_PKGS → the shared profile fallback
  * (${DSH_HOME:-~/.dsh}/profiles/node_modules/@deepseek-ai, where a dsh install
  * links the running host's packages) → the legacy scoop install → the bare
- * specifier. Verified against dsh 0.1.5-rc.1 (dsh-session 0.1.5-rc.2, format
- * v3 with the catalog present).
+ * specifier. Verified against dsh 0.2.0-rc.2 (dsh-session 0.2.0-rc.2, storage
+ * format v4).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
 
@@ -47,8 +56,9 @@ async function importHostPackage(pkg) {
 
 const { Session } = await importHostPackage('dsh-session');
 let sessionFormatCatalog;
+let createSessionFormatCatalogWithChildren;
 try {
-  ({ sessionFormatCatalog } = await importHostPackage('dsh-session-format-catalog'));
+  ({ sessionFormatCatalog, createSessionFormatCatalogWithChildren } = await importHostPackage('dsh-session-format-catalog'));
 } catch (error) {
   throw new Error(
     'this checker needs the host Session format catalog (dsh 0.1.5+): set DSH_HOST_PKGS to the running host\'s '
@@ -132,17 +142,109 @@ function scanZstdFrames(buffer) {
 
 /**
  * Decode one artifact to text.
- * @param zstPath - the session log; plaintext `.jsonl` is accepted too.
+ * @param logPath - the session log; plaintext `.jsonl` is accepted too.
  * @returns the decoded JSONL text, the zstd frame count, and any torn-tail note.
  */
-function readLogBytes(zstPath) {
-  const buf = readFileSync(zstPath);
+function readLogBytes(logPath) {
+  const buf = readFileSync(logPath);
   // zstd frame magic: 0x28 B5 2F FD; else treat as plaintext
   if (!(buf.length >= 4 && buf.readUInt32LE(0) === ZSTD_MAGIC)) return { text: buf.toString('utf8'), frames: 0, torn: undefined };
   const { frames, torn } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error(`no complete zstd frame (${torn})`);
   const text = Buffer.concat(frames.map(({ start, end }) => zstdDecompressSync(buf.subarray(start, end)))).toString('utf8');
   return { text, frames: frames.length, torn };
+}
+
+/** Generation filename: `session.jsonl[.zstd]` (v0) or `session.v<N>.jsonl[.zstd]`. */
+const GENERATION_NAME = /^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/;
+
+/** Version of one generation filename; undefined when it is not a generation. */
+function generationVersion(name) {
+  const match = GENERATION_NAME.exec(name);
+  if (match === null) return undefined;
+  return match[1] === undefined ? 0 : Number(match[1]);
+}
+
+/**
+ * Resolve a CLI argument to one log file: a directory selects its newest
+ * generation, a file is used as given.
+ * @param arg - session directory or log file path.
+ * @returns the resolved log path.
+ */
+function resolveLogPath(arg) {
+  if (!existsSync(arg)) throw new Error(`no such file or directory: ${arg}`);
+  if (!statSync(arg).isDirectory()) return arg;
+  const candidates = readdirSync(arg, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && GENERATION_NAME.test(entry.name))
+    .map((entry) => ({ name: entry.name, version: generationVersion(entry.name) }))
+    .sort((left, right) => right.version - left.version);
+  if (candidates.length === 0) throw new Error(`no session generation file in ${arg}`);
+  return join(arg, candidates[0].name);
+}
+
+/** Read only the first frame of an artifact — production stores the header alone there. */
+function readStoredHeader(logPath) {
+  const buf = readFileSync(logPath);
+  if (!(buf.length >= 4 && buf.readUInt32LE(0) === ZSTD_MAGIC)) {
+    const line = buf.toString('utf8').split('\n', 1)[0];
+    return line === undefined || line === '' ? undefined : JSON.parse(line);
+  }
+  const end = scanFrame(buf, 0);
+  const firstLine = zstdDecompressSync(buf.subarray(0, end)).toString('utf8').split('\n', 1)[0];
+  return firstLine === '' ? undefined : JSON.parse(firstLine);
+}
+
+/**
+ * Find the session's direct historical children: sibling session directories
+ * whose stored header names this session as parent.
+ * @param logPath - the resolved log file (inside its session directory).
+ * @param parentId - the parent session id.
+ * @returns child ids in directory order.
+ */
+function findHistoricalChildren(logPath, parentId) {
+  const bucket = dirname(dirname(logPath));
+  const children = [];
+  for (const entry of readdirSync(bucket, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('session-')) continue;
+    const childDir = join(bucket, entry.name);
+    let childLog;
+    try {
+      childLog = resolveLogPath(childDir);
+    } catch {
+      continue;
+    }
+    let header;
+    try {
+      header = readStoredHeader(childLog);
+    } catch {
+      continue;
+    }
+    if (header?.parentSession === parentId && header?.id !== parentId) children.push(header.id);
+    else if (header?.parentSession === parentId) children.push(entry.name);
+  }
+  return children;
+}
+
+/**
+ * Select the catalog that can read this artifact: the plain current catalog for
+ * current-format logs, otherwise a children-bound catalog (the V3→V4 migration
+ * refuses to run without an explicit child fact set, `[]` meaning childless).
+ * @param storedVersion - header version read from storage.
+ * @param logPath - resolved log path.
+ * @param id - session id.
+ * @returns the catalog to restore with.
+ */
+function selectCatalog(storedVersion, logPath, id) {
+  if (storedVersion === sessionFormatCatalog.currentVersion) return sessionFormatCatalog;
+  const children = findHistoricalChildren(logPath, id);
+  if (children.length > 0) {
+    throw new Error(
+      `legacy v${storedVersion} log has ${children.length} historical child session(s) [${children.join(', ')}]; `
+      + 'the V3→V4 migration needs their evidence, which only the harness collects. Validate the session\'s '
+      + `current generation (session.v${sessionFormatCatalog.currentVersion}.jsonl.zstd) instead, or open it in dsh.`,
+    );
+  }
+  return createSessionFormatCatalogWithChildren([]);
 }
 
 /** Split decoded JSONL into the header record plus the complete event rows. */
@@ -163,12 +265,13 @@ function splitRecords(text) {
 
 /**
  * Validate one log end to end through the host's restore path.
- * @param zstPath - the session log path.
+ * @param arg - session directory or log file path.
  * @returns a per-log report for the summary line.
  */
-function checkLog(zstPath) {
-  const name = zstPath.split(/[\\/]/).slice(-2).join('/');
-  const { text, frames, torn } = readLogBytes(zstPath);
+function checkLog(arg) {
+  const logPath = resolveLogPath(arg);
+  const name = `${basename(dirname(logPath))}/${basename(logPath)}`;
+  const { text, frames, torn } = readLogBytes(logPath);
   const { header: headerRecord, rows, tornTail } = splitRecords(text);
   if (headerRecord === undefined) throw new Error('empty session log');
 
@@ -184,9 +287,10 @@ function checkLog(zstPath) {
   if (info.status === 'unsupported') throw new Error(`unsupported session format v${info.storedVersion}: ${info.reason}`);
   if (info.status === 'malformed') throw new Error(`malformed session header: ${info.reason}`);
 
+  const catalog = selectCatalog(info.storedVersion, logPath, headerLine.id);
   // The exact options the JSONL backend uses to read a stored log
   // (dsh-session-persistence-jsonl parseHeaderRecord).
-  const restore = sessionFormatCatalog.createRestore(headerLine, { recovery: 'strict', validation: 'transformed' });
+  const restore = catalog.createRestore(headerLine, { recovery: 'strict', validation: 'transformed' });
   for (const [index, line] of rows.entries()) {
     let row;
     try {
@@ -213,12 +317,18 @@ function checkLog(zstPath) {
     }
   })();
 
+  // Current format: a tool result is a first-class `role: "tool"` message whose
+  // `content` IS the ContentBlock[] (format v4 dropped the old
+  // `[{type: "tool-result", content}]` wrapper). The bricked shape this checker
+  // exists for — a bare string where blocks belong — fails the array check.
+  let toolResults = 0;
   let malformed = 0;
   for (const event of artifact.events) {
     if (event?.type !== 'tool/result') continue;
+    toolResults++;
     const content = event?.data?.message?.content;
-    const block = Array.isArray(content) ? content[0] : undefined;
-    if (!Array.isArray(content) || block?.type !== 'tool-result' || !Array.isArray(block?.content)) malformed++;
+    if (!Array.isArray(content) || content.length === 0
+      || content.some((block) => block === null || typeof block !== 'object' || typeof block.type !== 'string')) malformed++;
   }
 
   const session = Session.fromRestore(artifact.header.id, artifact.events, artifact.header, artifact.inheritedEventCount, 'detached');
@@ -232,6 +342,7 @@ function checkLog(zstPath) {
     id: artifact.header.id,
     storedVersion: info.storedVersion,
     events: artifact.events.length,
+    toolResults,
     malformed,
     messages,
     frames,
@@ -245,7 +356,7 @@ for (const arg of process.argv.slice(2)) {
     const r = checkLog(arg);
     const verdict = r.malformed === 0 ? 'PASS' : 'FAIL';
     const notes = r.notes.length > 0 ? ` [${r.notes.join('; ')}]` : '';
-    console.log(`${verdict}  ${r.name}: id=${r.id} v=${r.storedVersion}->${sessionFormatCatalog.currentVersion} events=${r.events} malformed=${r.malformed} fromRestore=ok messages=${r.messages} frames=${r.frames}${notes}`);
+    console.log(`${verdict}  ${r.name}: id=${r.id} v=${r.storedVersion}->${sessionFormatCatalog.currentVersion} events=${r.events} toolResults=${r.toolResults} malformed=${r.malformed} fromRestore=ok messages=${r.messages} frames=${r.frames}${notes}`);
     if (r.malformed !== 0) failed++;
   } catch (error) {
     failed++;

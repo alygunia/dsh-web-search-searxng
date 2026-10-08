@@ -9,8 +9,8 @@
  *     → tool.output.render()                 (contract: ContentBlock[])
  *     → durable tool/result event            (host-shaped message envelope)
  *     → Session (host @deepseek-ai/dsh-session)
- *     → host format catalog encodeCurrentHeader/encodeCurrentEvent (v3 rows)
- *     → zlib.zstdCompress → session.v3.jsonl.zstd   (same encoding as production)
+ *     → host format catalog encodeCurrentHeader/encodeCurrentEvent (current rows)
+ *     → zlib.zstdCompress → session.v<N>.jsonl.zstd   (same encoding as production)
  *     → decompress + catalog restore + Session.fromRestore   (the restore gate)
  *     → deriveMessages() assertions
  *
@@ -26,14 +26,14 @@
  * Host packages resolve in order: `DSH_HOST_PKGS` → the shared profile
  * fallback (`${DSH_HOME:-~/.dsh}/profiles/node_modules/@deepseek-ai`) → the
  * legacy scoop install → the bare specifier. Keep the resolved host packages
- * on the same version as the running host (verified against dsh 0.1.5-rc.1 /
- * dsh-session 0.1.5-rc.2).
+ * on the same version as the running host (verified against dsh 0.2.0-rc.2 /
+ * dsh-session 0.2.0-rc.2, storage format v4).
  *
  * Run: `pnpm test:e2e` (hits the configured SearXNG instance over the network).
  */
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
@@ -112,7 +112,7 @@ console.log(`presentResult ok: ${view.title}`);
 
 // ---------------------------------------------------------------------------
 // 4. Materialize the durable events exactly like the host does, then write a
-//    real session.v3.jsonl.zstd through the catalog encoder + zstd.
+//    real session.v<N>.jsonl.zstd through the catalog encoder + zstd.
 // ---------------------------------------------------------------------------
 const now = Date.now();
 const callId = `call_${Math.random().toString(16).slice(2, 26)}`;
@@ -131,7 +131,7 @@ session.append('step/start', { turn: 1, step: 1 });
 session.append('assistant/message', {
   turn: 1,
   step: 1,
-  // dsh-session 0.1.5 settlement shape: an assistant message embeds its exact
+  // current format settlement shape: an assistant message embeds its exact
   // timed model stream. This offline fixture streams nothing, so it is empty.
   stream: [],
   message: {
@@ -148,17 +148,22 @@ session.append('tool/call', { turn: 1, step: 1, callId, name: tool.name, argumen
 session.append('tool/result', {
   turn: 1,
   step: 1,
+  // format v4: a tool result is a first-class `role: "tool"` message; `content`
+  // IS the ContentBlock[] (the old `[{type: "tool-result", content}]` wrapper is
+  // gone) and `toolCallId` must match the tool source's call id.
   message: {
-    role: 'user',
+    role: 'tool',
     id: `tool-${now.toString(36)}`,
+    toolCallId: callId,
     source: { kind: 'tool', callId },
-    content: [{ type: 'tool-result', toolCallId: callId, content: blocks, isError: false }],
+    isError: false,
+    content: blocks,
   },
 }, { surfaceOp: 'append' });
 session.append('step/end', { turn: 1, step: 1 });
 session.append('turn/end', { turn: 1, reason: { kind: 'end' } });
 
-const work = join(process.env.TMPDIR ?? '/tmp', `dsh-searxng-e2e-${now.toString(36)}`);
+const work = join(process.env.DSH_E2E_TMPDIR ?? tmpdir(), `dsh-searxng-e2e-${now.toString(36)}`);
 mkdirSync(work, { recursive: true });
 const writeLog = (id, headerLine, rows, filename) => {
   const jsonl = [JSON.stringify(headerLine), ...rows.map((row) => JSON.stringify(row))].join('\n') + '\n';
@@ -206,16 +211,17 @@ console.log(`fromRestore ok: ${artifact.events.length} events accepted by the ho
 const messages = restored.deriveMessages();
 const toolMessage = messages.find((m) => m.source?.kind === 'tool');
 assert.ok(toolMessage, 'derived history must contain the tool result message');
+assert.equal(toolMessage.role, 'tool', 'format v4 derives a tool-role message');
 const resultBlock = toolMessage.content[0];
-assert.equal(resultBlock.type, 'tool-result');
-assert.ok(Array.isArray(resultBlock.content), 'tool-result block content must be a ContentBlock[] — the exact check whose failure bricked sessions');
-assert.equal(resultBlock.content[0].type, 'text');
-assert.ok(resultBlock.content[0].text.includes('SearXNG ('), 'text block must carry the rendered SearXNG output');
-console.log(`deriveMessages ok: tool result carries ${resultBlock.content.length} block(s), "${resultBlock.content[0].text.slice(0, 60)}…"`);
+assert.equal(resultBlock.type, 'text', 'tool result content must be the ContentBlock[] itself (v4: no wrapper block)');
+assert.ok(resultBlock.text.includes('SearXNG ('), 'text block must carry the rendered SearXNG output');
+console.log(`deriveMessages ok: tool result carries ${toolMessage.content.length} block(s), "${resultBlock.text.slice(0, 60)}…"`);
 
 // ---------------------------------------------------------------------------
-// 7. Vaccine: the OLD buggy shape (string block content) must be REJECTED by
-//    the same restore gate — i.e. this test really detects the regression.
+// 7. Vaccine: the bricked shape (a bare string where ContentBlock[] belongs)
+//    must be REJECTED — by the v4 encoder, and by the restore gate even when a
+//    malformed row already sits on disk. This is what makes the test able to
+//    detect the regression instead of passing forever.
 // ---------------------------------------------------------------------------
 const poisonId = `${sessionId}-poison`;
 const poisonHeader = { ...header, id: poisonId };
@@ -226,25 +232,35 @@ poisoned.append('tool/result', {
   turn: 1,
   step: 1,
   message: {
-    role: 'user',
+    role: 'tool',
     id: `tool-poison-${now.toString(36)}`,
+    toolCallId: callId,
     source: { kind: 'tool', callId },
-    content: [{ type: 'tool-result', toolCallId: callId, content: blocks[0].text, isError: false }], // ← the old bug
+    isError: false,
+    content: blocks[0].text, // ← the bug: a bare string where the block array belongs
   },
 }, { surfaceOp: 'append' });
 const poisonEvents = poisoned.snapshotEvents();
-const { path: poisonPath } = writeLog(
-  poisonId,
-  sessionFormatCatalog.encodeCurrentHeader(poisoned.header, 0),
-  poisonEvents.map((event) => sessionFormatCatalog.encodeCurrentEvent(event)),
-  `session.v${sessionFormatCatalog.currentVersion}.poison.jsonl.zstd`,
+const poisonRow = poisonEvents.at(-1);
+
+assert.throws(
+  () => sessionFormatCatalog.encodeCurrentEvent(poisonRow),
+  /array content|tool-result/,
+  'the v4 format encoder must reject a bare-string tool result',
 );
+
+const poisonPath = join(work, `session.v${sessionFormatCatalog.currentVersion}.poison.jsonl.zstd`);
+writeFileSync(poisonPath, zstdCompressSync(Buffer.from([
+  JSON.stringify(sessionFormatCatalog.encodeCurrentHeader(poisoned.header, 0)),
+  ...poisonEvents.slice(0, -1).map((event) => JSON.stringify(sessionFormatCatalog.encodeCurrentEvent(event))),
+  JSON.stringify(poisonRow), // bypass the encoder: the bad row reaches disk
+].join('\n') + '\n', 'utf8')));
 assert.throws(
   () => restoreFromFile(poisonPath),
-  /tool-result/,
+  /array content|tool-result/,
   'restore gate must reject the legacy string-content shape',
 );
-console.log('vaccine ok: legacy string-content shape is rejected by the restore gate (regression detected)');
+console.log('vaccine ok: the bricked string-content shape is rejected by the encoder and the restore gate');
 
 rmSync(work, { recursive: true, force: true });
 console.log('\ne2e ok: execute → render(ContentBlock[]) → catalog encode → zstd → catalog restore → fromRestore → deriveMessages all pass, legacy bug shape rejected');

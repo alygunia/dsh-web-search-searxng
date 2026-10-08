@@ -6,7 +6,7 @@
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，钉定 `scholarEngines` 引擎（本部署为 `pubmed,arxiv,google scholar`，默认 `google scholar`）聚合学术检索——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
 3. **`searxng_search` 工具（可选）**：`standaloneSearch: true` 时注册通用搜索工具，与 `searxng_scholar` 共享同一执行核心，仅引擎来源不同（配置的 `engines` 白名单）；供没有 `web_search` 工具的 profile（如纯 TUI）使用，web profile 默认关闭以免列出两个等价的通用搜索工具。
 
-纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本，当前 `^0.1.5-rc.2`）。
+纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本，当前 `^0.2.0-rc.2`）。
 
 本包为独立 checkout（本机位于 `/mnt/md/liz/Project/dsh/dsh-web-search-searxng`），profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
 
@@ -102,17 +102,20 @@ pnpm install
 | 命令 | 依赖 | 覆盖 |
 |---|---|---|
 | `pnpm test` | 无（stub 掉 `fetch`） | 模块导出、加载期配置校验（`baseURL` 类型/合法性、`timeoutMs`）、provider 与工具的注册形态、请求 URL 构造、结果归一化，以及**投影契约回归断言**（`render` 必须返回 `ContentBlock[]`；`presentResult` 必须从宿主给的 `ToolResult.meta` 取标题、失败时回退通用卡片） |
-| `pnpm test:e2e` | 可达的 SearXNG 实例（`SEARXNG_BASE_URL` 可覆盖 patch 里的地址） | 离线全链路：真实 HTTP → `execute` → `render` → 宿主同款 `tool/result` → 宿主 format catalog 的 `encodeCurrentHeader`/`encodeCurrentEvent` 编码 v3 行 + zstd 写盘 → catalog `createRestore` + `Session.fromRestore` 恢复闸门 → `deriveMessages` 断言；末尾以旧 bug 形态（字符串 content）重放恢复闸门，验证畸形确实被拒绝（疫苗测试） |
+| `pnpm test:e2e` | 可达的 SearXNG 实例（`SEARXNG_BASE_URL` 可覆盖 patch 里的地址） | 离线全链路：真实 HTTP → `execute` → `render` → 宿主同款 `tool/result`（v4：`role: "tool"` 消息，`content` 即块数组） → 宿主 format catalog 的 `encodeCurrentHeader`/`encodeCurrentEvent` 编码当前代际行 + zstd 写盘 → catalog `createRestore` + `Session.fromRestore` 恢复闸门 → `deriveMessages` 断言；末尾验证畸形形态被编码器**与**恢复闸门双重拒绝（疫苗测试） |
 | `pnpm test:dsh`（Windows PowerShell）<br>`pnpm test:dsh:sh`（POSIX bash） | 可达实例 + LLM API key（`ZAI_CODING_CN_API_KEY`，终端环境或 `~/.dsh/.env`） | 真实独立 dsh 进程：自动把本包 link 进内置 `headless` 档（幂等），从 scratch 工作区跑一次性 `dsh --profile headless` 任务（无端口，与运行中 GUI 互不影响），再用恢复闸门校验产出的会话日志 |
 
-会话日志校验器可单独使用（支持多帧拼接 zstd 与明文两种物理编码；接受 `session.v<N>.jsonl[.zstd]` 与旧的 `session.jsonl[.zstd]`）：
+会话日志校验器可单独使用（支持多帧拼接 zstd 与明文两种物理编码；参数可以是会话目录——自动选最新代际——或某个具体代际文件）：
 
 ```sh
-node scripts/check-session-log.mjs ~/.dsh/sessions/<bucket>/session-*/session.v3.jsonl.zstd
-# PASS  <bucket>/session-xxxx/session.v3.jsonl.zstd: id=... v=3->3 events=N malformed=0 fromRestore=ok messages=M frames=F
+node scripts/check-session-log.mjs ~/.dsh/sessions/<bucket>/session-<id>          # 自动取最新代际
+node scripts/check-session-log.mjs ~/.dsh/sessions/<bucket>/session-<id>/session.v4.jsonl.zstd
+# PASS  <bucket>/session-<id>/session.v4.jsonl.zstd: id=... v=4->4 events=N toolResults=T malformed=0 fromRestore=ok messages=M frames=F
 ```
 
-它用**宿主自己的** Session format catalog 解码（`@deepseek-ai/dsh-session-format-catalog`，与 JSONL 持久化后端同一条解码 + 迁移链），所以 v3 直接读、旧版日志按后端同款迁移链升级；末尾未写完的记录与撕裂的 zstd 尾帧会被丢弃并标注 `[tail=…]`（与生产“只恢复已提交前缀”一致），其余任何坏行一律 FAIL。
+它用**宿主自己的** Session format catalog 解码（`@deepseek-ai/dsh-session-format-catalog`，与 JSONL 持久化后端同一条解码 + 迁移链），所以当前代际（v4）直接读、旧代际日志按后端同款迁移链升级；末尾未写完的记录与撕裂的 zstd 尾帧会被丢弃并标注 `[tail=…]`（与生产“只恢复已提交前缀”一致），其余任何坏行一律 FAIL。
+
+注意 pre-v4 日志：V3→V4 迁移必须显式提供该父会话的**历史子会话事实**（`createSessionFormatCatalogWithChildren`，空数组表示无子）。校验器会扫描同级会话目录判断是否真的有子会话：无子则传 `[]` 正常迁移；确有子会话时**不会**用错误的空事实集硬迁，而是提示改用该会话已存在的当前代际文件（或交给 dsh 本身恢复）。
 
 `web_search` 提供方的装配验证：
 
@@ -127,7 +130,7 @@ dsh --profile web --dump-config | Select-String searxng     # PowerShell
 
 `defineTool` 对投影函数的形态有硬性契约（dsh-tools `schema.d.ts`），运行时不校验、违反会**静默落库并造成会话级故障**：
 
-- `output.render` 必须返回 `ContentBlock[]`（如 `[{ type: 'text', text: '…' }]`）。返回裸字符串时，畸形结果原样写入持久 `tool/result`（块的 `content` 为字符串），下一步构建模型请求即崩溃（`content.some is not a function`），此后该会话每轮必错；重启后恢复会话时又被 `assertMessageEventShape` 拒绝——整个会话无法再打开。
+- `output.render` 必须返回 `ContentBlock[]`（如 `[{ type: 'text', text: '…' }]`）。返回裸字符串时，畸形结果原样写入持久 `tool/result`，下一步构建模型请求即崩溃（`content.some is not a function`），此后该会话每轮必错；重启后恢复会话时又被格式校验拒绝——整个会话无法再打开。（当前 v4 存储把块数组直接放在 `role: "tool"` 消息的 `content` 上，因此“这个位置必须是数组”这一点没变，校验还前移到了编码器：畸形形态连落盘都过不去。）
 - `presentCall` / `presentResult` 必须返回 card 视图对象（如 `{ card: 'generic', title: '…' }`），而非裸字符串。
 - `presentResult(args, result)` 的第二参是 **`ToolResult`（`{ content, isError, meta }`），不是规范输出值**。卡片要用的字段必须先经 `output.presentationMeta` 投影进 `meta`：直接读 `result.total` 只会渲染出 `undefined result(s) … (undefined)`（且失败调用也会画出一张假卡片）。`presentationMeta` 的返回值会被原样持久化到 `tool/result`，因此它必须是无损 JSON；`result.isError` 时返回 `undefined` 以回退到通用错误卡片。
 
@@ -143,5 +146,6 @@ dsh --profile web --dump-config | Select-String searxng     # PowerShell
 - web_search 提供方仍只映射 `{url,title,snippet}`；`publishedDate`/`engines` 仅在 `searxng_scholar` 工具中映射（SearXNG 各引擎时间格式不一，聚合场景未做归一）。
 - `searxng_scholar` 不分页抓取：单次请求返回单页，翻页由模型显式传 `page`。
 - 只做搜索；`web_fetch` 不受影响（base 默认禁用 fetch）。
-- 运行时依赖 `@deepseek-ai/dsh-tools@^0.1.5-rc.2`（与宿主 0.1.5-rc.x 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。
-- 会话侧基线是 dsh-session 0.1.5：会话 header 必须 `version: 3`（`SESSION_FORMAT_VERSION`）、带 `isSeeded` 布尔与 `delegationDepth`，锁文件名为 `session.v3.jsonl.zstd`，事件行由宿主 format catalog 编解码（0.1.2 时代的 `packChunkRuns`/`decodeStorageRecord` 已从 dsh-session 移除）。`assistant/message` 事件还必须携带结算字段 `stream: []`。
+- 运行时依赖 `@deepseek-ai/dsh-tools@^0.2.0-rc.2`（与宿主 0.2.0-rc.x 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。
+- 会话侧基线是 dsh-session 0.2.0-rc.2（存储格式 **v4**）：会话 header 必须 `version: 4`（`SESSION_FORMAT_VERSION`）、带 `isSeeded` 布尔与 `delegationDepth`；每个代际各占一个不可变文件 `session[.v<N>].jsonl[.zstd]`（v0 保留无版本后缀的旧名），当前代际是 `session.v4.jsonl.zstd`；事件行由宿主 format catalog 编解码（0.1.2 时代的 `packChunkRuns`/`decodeStorageRecord` 已从 dsh-session 移除）。v4 的 `tool/result` 是**一等 `role: "tool"` 消息**：`content` 直接是 `ContentBlock[]`（不再有 `{type:"tool-result"}` 包装块），`toolCallId` 必须与 `source.callId` 一致。`assistant/message` 事件还必须携带结算字段 `stream: []`。pre-v4 日志的 V3→V4 迁移需要父会话的历史子会话事实（见上）。
+- 本包 link 到多个 profile 时共享同一份 `cordis.patch.yml`；patch 对 `web` 行是**整行替换**，0.2.0-rc.2 该行的键是 `searchProvider` + `fetchProvider`，两者都必须在 patch 里重述（漏掉 `fetchProvider` 会让 `web_fetch` 触发 `WEB_PROVIDER_AMBIGUOUS`）。
