@@ -20,7 +20,10 @@
       "patch": "./cordis.patch.yml"
     }
   },
-  "dependencies": {
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
+  },
+  "devDependencies": {
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
   },
   "license": "MIT"
