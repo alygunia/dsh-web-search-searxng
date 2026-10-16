@@ -6,7 +6,7 @@
 2. **`searxng_scholar` 工具**：在 `ctx.tools` 注册独立模型工具，钉定 `scholarEngines` 引擎（本部署为 `pubmed,arxiv,google scholar`，默认 `google scholar`）聚合学术检索——免 ai4scholar 积分的学术发现通道；结构化引文数/摘要/引文图谱仍以 dsh-ai4scholar 工具为准。
 3. **`searxng_search` 工具（可选）**：`standaloneSearch: true` 时注册通用搜索工具，与 `searxng_scholar` 共享同一执行核心，仅引擎来源不同（配置的 `engines` 白名单）；供没有 `web_search` 工具的 profile（如纯 TUI）使用，web profile 默认关闭以免列出两个等价的通用搜索工具。
 
-纯 ESM、无需构建；运行时依赖 `@deepseek-ai/dsh-tools`（仅用于 `defineTool` 契约，与宿主同版本，当前 `^0.2.0-rc.2`）。
+纯 ESM、无需构建；运行期只用宿主的 `@deepseek-ai/dsh-tools`（`defineTool` 契约），且**声明为可选 peer**而非依赖：profile 安装不在 profile 内落第二份宿主包，运行时由宿主解析提供；仓库自身把它放在 `devDependencies`，好让 `pnpm test` 解析得到（见「安装」一节里 `link:` 与 `file:` 的差别，以及「已知限制」）。
 
 本包为独立 checkout（本机位于 `/mnt/md/liz/Project/dsh/dsh-web-search-searxng`），profile 通过 `link:`/`file:` 路径引用；也可整体拷到 `~/.dsh/plugins/` 后按相对路径引用。
 
@@ -146,6 +146,6 @@ dsh --profile web --dump-config | Select-String searxng     # PowerShell
 - web_search 提供方仍只映射 `{url,title,snippet}`；`publishedDate`/`engines` 仅在 `searxng_scholar` 工具中映射（SearXNG 各引擎时间格式不一，聚合场景未做归一）。
 - `searxng_scholar` 不分页抓取：单次请求返回单页，翻页由模型显式传 `page`。
 - 只做搜索；`web_fetch` 不受影响（base 默认禁用 fetch）。
-- 运行时依赖 `@deepseek-ai/dsh-tools@^0.2.0-rc.2`（与宿主 0.2.0-rc.x 同步）；宿主升级后若 schema DSL 变化需同步该依赖版本。
+- 运行期由宿主提供 `@deepseek-ai/dsh-tools`：本包把它声明为**可选 peerDependency**（`^0.2.0-rc.2`，与宿主 0.2.0-rc.x 同步）并同时列进 `devDependencies` 供本仓库测试解析，**绝不放进 `dependencies`**。放进去的后果是：profile 用 `file:`/tarball 安装时 pnpm 会在 profile 内再落一份宿主包（`@deepseek-ai/dsh-tools` 及其 `@deepseek-ai/dsh-brand` / `@deepseek-ai/dsh-util-values` / `@deepseek-ai/schemastery` 等），模块身份随之分裂，该 profile 的**每次**工具调用都会以 `Cannot read properties of undefined (reading 'prepare')` 失败——机制与复现见 `../NOTE.md`。宿主升级后若 schema DSL 变化，同步这个版本范围即可（不满足时 DSH 会按 peer 兼容性检查拒绝装配该 bundle）。
 - 会话侧基线是 dsh-session 0.2.0-rc.2（存储格式 **v4**）：会话 header 必须 `version: 4`（`SESSION_FORMAT_VERSION`）、带 `isSeeded` 布尔与 `delegationDepth`；每个代际各占一个不可变文件 `session[.v<N>].jsonl[.zstd]`（v0 保留无版本后缀的旧名），当前代际是 `session.v4.jsonl.zstd`；事件行由宿主 format catalog 编解码（0.1.2 时代的 `packChunkRuns`/`decodeStorageRecord` 已从 dsh-session 移除）。v4 的 `tool/result` 是**一等 `role: "tool"` 消息**：`content` 直接是 `ContentBlock[]`（不再有 `{type:"tool-result"}` 包装块），`toolCallId` 必须与 `source.callId` 一致。`assistant/message` 事件还必须携带结算字段 `stream: []`。pre-v4 日志的 V3→V4 迁移需要父会话的历史子会话事实（见上）。
 - 本包 link 到多个 profile 时共享同一份 `cordis.patch.yml`；patch 对 `web` 行是**整行替换**，0.2.0-rc.2 该行的键是 `searchProvider` + `fetchProvider`，两者都必须在 patch 里重述（漏掉 `fetchProvider` 会让 `web_fetch` 触发 `WEB_PROVIDER_AMBIGUOUS`）。
